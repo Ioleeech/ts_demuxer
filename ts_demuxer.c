@@ -21,6 +21,11 @@
 #define TS_PID_MIN          0x0020
 #define TS_PID_MAX          0x1FFA
 
+#define TABLE_ID_PAT        0x00
+#define TABLE_ID_PMT        0x02
+#define TABLE_ID_DVB_MIN    0x40
+#define TABLE_ID_DVB_MAX    0x7F
+
 #define ES_STREAM_H264      0x1B
 #define ES_STREAM_ADTS_AAC  0x0F
 
@@ -31,6 +36,7 @@ typedef struct _TS_DEMUXER {
     unsigned int uPacketSize;
     unsigned int uPacketsNum;
     unsigned int uPMT_PID;
+    unsigned int uPCR_PID;
     unsigned int uVideoPID;
     unsigned int uAudioPID;
     P_ES_OUTPUT  pVideoOutput;
@@ -103,9 +109,9 @@ static int _ts_demuxer_get_file_info(FILE* pFile, unsigned int* pFileOffset, uns
     return EXIT_SUCCESS;
 }
 
-static int _ts_demuxer_parse_adapt_field(TS_DEMUXER* pTsDemuxer, unsigned char* pAdaptField, unsigned int uAdaptLen)
+static int _ts_demuxer_parse_adapt_field(TS_DEMUXER* pTsDemuxer, unsigned char* pAdaptField, unsigned int uAdaptLen, unsigned int uPID)
 {
-//  OUT("%08X : Adaptation field (%u bytes)\n", pTsDemuxer->uFileOffset, uAdaptLen);
+    DBG("%08X : Adaptation field (%u bytes)\n", pTsDemuxer->uFileOffset, uAdaptLen);
 
     if (uAdaptLen < 1)
         return EXIT_SUCCESS;
@@ -116,39 +122,42 @@ static int _ts_demuxer_parse_adapt_field(TS_DEMUXER* pTsDemuxer, unsigned char* 
         return EXIT_FAILURE;
     }
 
-//  unsigned int uDiscontinuity = pAdaptField[0] & 0x80;
-//  unsigned int uRandomAccess  = pAdaptField[0] & 0x40;
-//  unsigned int uEsPriority    = pAdaptField[0] & 0x20;
-    unsigned int uPCR           = pAdaptField[0] & 0x10;
-//  unsigned int uOPCR          = pAdaptField[0] & 0x08;
-//  unsigned int uSplicingPoint = pAdaptField[0] & 0x04;
-//  unsigned int uPrivateData   = pAdaptField[0] & 0x02;
-//  unsigned int uExtension     = pAdaptField[0] & 0x01;
-
-    if ((uPCR) && (uAdaptLen > 6))
+    if ((pTsDemuxer->uPCR_PID > 0) && (uPID == pTsDemuxer->uPCR_PID))
     {
-        // 48-bit program clock reference (PCR):
-        // 33 bits: base
-        //  6 bits: reserved
-        //  9 bits: extension
-        //
-        // PCR (90 kHz clock) = base
-        // PCR (27 MHz clock) = base * 300 + extension
-        //
-        // 90 kHz PCR
-        unsigned long long lluPCR_90kHz  =  pAdaptField[1]; lluPCR_90kHz <<= 8;
-                           lluPCR_90kHz |=  pAdaptField[2]; lluPCR_90kHz <<= 8;
-                           lluPCR_90kHz |=  pAdaptField[3]; lluPCR_90kHz <<= 8;
-                           lluPCR_90kHz |=  pAdaptField[4]; lluPCR_90kHz <<= 1;
-                           lluPCR_90kHz |= (pAdaptField[5] >> 7);
+//      unsigned int uDiscontinuity = pAdaptField[0] & 0x80;
+//      unsigned int uRandomAccess  = pAdaptField[0] & 0x40;
+//      unsigned int uEsPriority    = pAdaptField[0] & 0x20;
+        unsigned int uPCR           = pAdaptField[0] & 0x10;
+//      unsigned int uOPCR          = pAdaptField[0] & 0x08;
+//      unsigned int uSplicingPoint = pAdaptField[0] & 0x04;
+//      unsigned int uPrivateData   = pAdaptField[0] & 0x02;
+//      unsigned int uExtension     = pAdaptField[0] & 0x01;
 
-        OUT("PCR %llu\n", lluPCR_90kHz);
+        if ((uPCR) && (uAdaptLen > 6))
+        {
+            // 48-bit program clock reference (PCR):
+            // 33 bits: base
+            //  6 bits: reserved
+            //  9 bits: extension
+            //
+            // PCR (90 kHz clock) = base
+            // PCR (27 MHz clock) = base * 300 + extension
+            //
+            // 90 kHz PCR
+            unsigned long long lluPCR_90kHz  =  pAdaptField[1]; lluPCR_90kHz <<= 8;
+                               lluPCR_90kHz |=  pAdaptField[2]; lluPCR_90kHz <<= 8;
+                               lluPCR_90kHz |=  pAdaptField[3]; lluPCR_90kHz <<= 8;
+                               lluPCR_90kHz |=  pAdaptField[4]; lluPCR_90kHz <<= 1;
+                               lluPCR_90kHz |= (pAdaptField[5] >> 7);
+
+            OUT("PID %u: PCR %llu\n", uPID, lluPCR_90kHz);
+        }
     }
 
     return EXIT_SUCCESS;
 }
 
-static int _ts_demuxer_parse_pat(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload, unsigned int uPayloadLen)
+static int _ts_demuxer_parse_pat(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload, unsigned int uPayloadLen, unsigned int uPID)
 {
 //  unsigned int  uPayloadPointer =  pPayload[0];
     unsigned char uTableID        =  pPayload[1];              // Must be 0 for PAT
@@ -159,12 +168,19 @@ static int _ts_demuxer_parse_pat(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
                   uSectionLength |=  pPayload[3];
 
     if ((uPrivateBit)
-    ||  (uTableID            != 0x00)
-    ||  (uReserved1          != 0x0C)
-    || ((uSectionLength + 4) != uPayloadLen)
-    ||  (uSectionLength < 4))
+    ||  (uTableID   != TABLE_ID_PAT)
+    ||  (uReserved1 != 0x0C)
+    ||  (uSectionLength < 4)
+    || ((uSectionLength + 4) > uPayloadLen))
     {
-        ERR("%08X : Incorrect table header for PAT (%02X %02X %02X)\n", pTsDemuxer->uFileOffset, pPayload[0], pPayload[1], pPayload[2]);
+        ERR("%08X : Incorrect table header for PAT (%02X %02X %02X %02X)\n", pTsDemuxer->uFileOffset, pPayload[0], pPayload[1], pPayload[2], pPayload[3]);
+        return EXIT_FAILURE;
+    }
+
+    // Special requirements: TS file must include both types of data - video and audio
+    if ((pTsDemuxer->uPMT_PID) && ((! pTsDemuxer->uVideoPID) || (! pTsDemuxer->uAudioPID)))
+    {
+        ERR("Second PAT is found but video or audio are not\n");
         return EXIT_FAILURE;
     }
 
@@ -197,7 +213,7 @@ static int _ts_demuxer_parse_pat(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
             if (! pTsDemuxer->uPMT_PID)
                 pTsDemuxer->uPMT_PID = uPMT_PID;
 
-            OUT("PMT PID %u\n", uPMT_PID);
+            OUT("PID %u: PAT table, PMT PID %u\n", uPID, uPMT_PID);
 
             if (uSectionNum >= uSectionLast)
                 break;
@@ -211,7 +227,7 @@ static int _ts_demuxer_parse_pat(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
     return EXIT_SUCCESS;
 }
 
-static int _ts_demuxer_parse_pmt(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload, unsigned int uPayloadLen)
+static int _ts_demuxer_parse_pmt(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload, unsigned int uPayloadLen, unsigned int uPID)
 {
 //  unsigned int  uPayloadPointer =  pPayload[0];
     unsigned char uTableID        =  pPayload[1];              // Must be 2 for PMT
@@ -221,13 +237,22 @@ static int _ts_demuxer_parse_pmt(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
     unsigned int  uSectionLength  = (pPayload[2] & 0x03) << 8;
                   uSectionLength |=  pPayload[3];
 
-    if ((uPrivateBit)
-    ||  (uTableID            != 0x02)
-    ||  (uReserved1          != 0x0C)
-    || ((uSectionLength + 4) != uPayloadLen)
-    ||  (uSectionLength < 4))
+    if ((! uPrivateBit)
+    &&  (uTableID   >= TABLE_ID_DVB_MIN)
+    &&  (uTableID   <= TABLE_ID_DVB_MAX)
+    &&  (uReserved1 == 0x0C))
     {
-        ERR("%08X : Incorrect table header for PMT (%02X %02X %02X)\n", pTsDemuxer->uFileOffset, pPayload[0], pPayload[1], pPayload[2]);
+        // Table is correct, but it is not PMT
+        return EXIT_SUCCESS;
+    }
+
+    if ((uPrivateBit)
+    ||  (uTableID   != TABLE_ID_PMT)
+    ||  (uReserved1 != 0x0C)
+    ||  (uSectionLength < 4)
+    || ((uSectionLength + 4) > uPayloadLen))
+    {
+        ERR("%08X : Incorrect table header for PMT (%02X %02X %02X %02X)\n", pTsDemuxer->uFileOffset, pPayload[0], pPayload[1], pPayload[2], pPayload[3]);
         return EXIT_FAILURE;
     }
 
@@ -258,7 +283,10 @@ static int _ts_demuxer_parse_pmt(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
             unsigned int  uInfoLen   = (pSection[2] & 0x03) << 8;
                           uInfoLen  |=  pSection[3];
 
-            OUT("PCR PID %u\n", uPCR_PID);
+            if (! pTsDemuxer->uPCR_PID)
+                pTsDemuxer->uPCR_PID = uPCR_PID;
+
+            OUT("PID %u: PMT table, PCR PID %u\n", uPID, uPCR_PID);
 
             if (uSectionLength < (4 + uInfoLen))
                 break;
@@ -276,13 +304,23 @@ static int _ts_demuxer_parse_pmt(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
                 unsigned int  uStrInfLen  = (pSection[3] & 0x03) << 8;
                               uStrInfLen |=  pSection[4];
 
-                if ((! pTsDemuxer->uVideoPID) && (uStreamType == ES_STREAM_H264))
-                    pTsDemuxer->uVideoPID = uStreamPID;
+                switch (uStreamType)
+                {
+                    case ES_STREAM_H264:
+                        if (! pTsDemuxer->uVideoPID) pTsDemuxer->uVideoPID = uStreamPID;
+                        OUT("PID %u: PMT table, video stream type 0x%02X PID %u\n", uPID, uStreamType, uStreamPID);
+                        break;
 
-                if ((! pTsDemuxer->uAudioPID) && (uStreamType == ES_STREAM_ADTS_AAC))
-                    pTsDemuxer->uAudioPID = uStreamPID;
+                    case ES_STREAM_ADTS_AAC:
+                        if (! pTsDemuxer->uAudioPID) pTsDemuxer->uAudioPID = uStreamPID;
+                        OUT("PID %u: PMT table, audio stream type 0x%02X PID %u\n", uPID, uStreamType, uStreamPID);
+                        break;
 
-                OUT("Stream type 0x%02X PID %u\n", uStreamType, uStreamPID);
+                    default:
+                        OUT("PID %u: PMT table, stream type 0x%02X PID %u\n", uPID, uStreamType, uStreamPID);
+                        break;
+                }
+
 
                 if (uSectionLength < (5 + uStrInfLen))
                     break;
@@ -298,6 +336,19 @@ static int _ts_demuxer_parse_pmt(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
         }
     }
 
+    // Special requirements: TS file must include both types of data - video and audio
+    if (! pTsDemuxer->uVideoPID)
+    {
+        ERR("TS file must include video\n");
+        return EXIT_FAILURE;
+    }
+
+    if (! pTsDemuxer->uAudioPID)
+    {
+        ERR("TS file must include audio\n");
+        return EXIT_FAILURE;
+    }
+
     return EXIT_SUCCESS;
 }
 
@@ -310,13 +361,13 @@ static int _ts_demuxer_parse_payload(TS_DEMUXER*    pTsDemuxer,
 {
     P_ES_OUTPUT pOutput = BAD_ES_OUTPUT;
 
-//  OUT("%08X : Payload (%u bytes, %02X %02X %02X %02X), PID %u, Unit start %u, Continuity %u\n",
-//      pTsDemuxer->uFileOffset,
-//      uPayloadLen,
-//      pPayload[0], pPayload[1], pPayload[2], pPayload[3],
-//      uPID,
-//      uUnitStart,
-//      uContinuity);
+    DBG("%08X : Payload (%u bytes, %02X %02X %02X %02X), PID %u, Unit start %u, Continuity %u\n",
+        pTsDemuxer->uFileOffset,
+        uPayloadLen,
+        pPayload[0], pPayload[1], pPayload[2], pPayload[3],
+        uPID,
+        uUnitStart,
+        uContinuity);
 
     if (uPayloadLen < 1)
     {
@@ -329,12 +380,12 @@ static int _ts_demuxer_parse_payload(TS_DEMUXER*    pTsDemuxer,
         if (uPID == TS_PID_PAT)
         {
             // Program association table (PAT)
-            return _ts_demuxer_parse_pat(pTsDemuxer, pPayload, uPayloadLen);
+            return _ts_demuxer_parse_pat(pTsDemuxer, pPayload, uPayloadLen, uPID);
         }
         else if ((pTsDemuxer->uPMT_PID > 0) && (uPID == pTsDemuxer->uPMT_PID))
         {
             // Program map table (PMT)
-            return _ts_demuxer_parse_pmt(pTsDemuxer, pPayload, uPayloadLen);
+            return _ts_demuxer_parse_pmt(pTsDemuxer, pPayload, uPayloadLen, uPID);
         }
     }
 
@@ -345,7 +396,7 @@ static int _ts_demuxer_parse_payload(TS_DEMUXER*    pTsDemuxer,
         pOutput = pTsDemuxer->pAudioOutput;
 
     return (pOutput != BAD_ES_OUTPUT)
-           ? es_output_parse_pes(pOutput, pPayload, uPayloadLen, uUnitStart, uContinuity)
+           ? es_output_parse_pes(pOutput, pPayload, uPayloadLen, uPID, uUnitStart, uContinuity)
            : EXIT_SUCCESS;
 }
 
@@ -404,7 +455,7 @@ static int _ts_demuxer_parse_packet(TS_DEMUXER* pTsDemuxer, unsigned char* pPack
                     return EXIT_FAILURE;
             }
 
-            if ((pAdaptField) && (_ts_demuxer_parse_adapt_field(pTsDemuxer, pAdaptField, uAdaptLen) != EXIT_SUCCESS))
+            if ((pAdaptField) && (_ts_demuxer_parse_adapt_field(pTsDemuxer, pAdaptField, uAdaptLen, uPID) != EXIT_SUCCESS))
                 return EXIT_FAILURE;
 
             if ((pPayload) && (_ts_demuxer_parse_payload(pTsDemuxer, pPayload, uPayloadLen, uPID, uUnitStart, uContinuity) != EXIT_SUCCESS))
@@ -458,6 +509,7 @@ P_TS_DEMUXER ts_demuxer_create(const char* pFileName)
     pTsDemuxer->uPacketSize  = uPacketSize;
     pTsDemuxer->uPacketsNum  = 0;
     pTsDemuxer->uPMT_PID     = 0;
+    pTsDemuxer->uPCR_PID     = 0;
     pTsDemuxer->uVideoPID    = 0;
     pTsDemuxer->uAudioPID    = 0;
     pTsDemuxer->pVideoOutput = BAD_ES_OUTPUT;
@@ -506,7 +558,8 @@ int ts_demuxer_add_output(P_TS_DEMUXER pDemuxer, ES_OUTPUT_TYPE eOutType, const 
 
     if (*ppOutput != BAD_ES_OUTPUT)
     {
-        ERR("Output already exists (%s)\n", pStrOutputType[eOutType]);
+        const char* pOutType = es_output_type_str(eOutType);
+        ERR("%s output already exists\n", pOutType);
         return EXIT_FAILURE;
     }
 
@@ -530,6 +583,8 @@ int ts_demuxer_start(P_TS_DEMUXER pDemuxer)
         return EXIT_FAILURE;
 
     // Read data to buffer and process it
+    OUT("----------------------------------------\n");
+
     for ( ; ; )
     {
         unsigned int uRead = fread(pBuffer, 1, uBufSize, pTsDemuxer->pFile);
@@ -544,6 +599,7 @@ int ts_demuxer_start(P_TS_DEMUXER pDemuxer)
     // Release data buffer
     free(pBuffer);
 
+    OUT("----------------------------------------\n");
     OUT("%u packets were processed\n", pTsDemuxer->uPacketsNum);
     return EXIT_SUCCESS;
 }

@@ -11,15 +11,16 @@ typedef enum _ES_OUTPUT_TYPE {
     ES_OUTPUT_MAX_NUM
 } ES_OUTPUT_TYPE;
 
-extern const char* pStrOutputType[];
-
 P_ES_OUTPUT es_output_create    (const char* pFileName, ES_OUTPUT_TYPE eType);
 void        es_output_free      (P_ES_OUTPUT pOutput);
 
 int         es_output_parse_pes (P_ES_OUTPUT    pOutput,
                                  unsigned char* pData,
                                  unsigned int   uLength,
+                                 unsigned int   uPID,
                                  unsigned int   uUnitStart,
                                  unsigned int   uContinuity);
+
+const char* es_output_type_str  (ES_OUTPUT_TYPE eType);
 
 #endif // __ES_OUTPUT_H__
