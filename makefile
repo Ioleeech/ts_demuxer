@@ -6,7 +6,6 @@ OUT_DIR  := ${ROOT_DIR}/output
 
 HEADERS  := $(wildcard *.h)
 SOURCES  := $(wildcard *.c)
-OBJECTS  := $(patsubst %.c,%.o,${SOURCES})
 OBJECTS  := $(patsubst %.c,${OUT_DIR}/%.o,${SOURCES})
 BINARY   := ${OUT_DIR}/${PROJECT}
 
