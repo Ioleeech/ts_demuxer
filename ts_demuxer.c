@@ -23,8 +23,6 @@
 
 #define TABLE_ID_PAT        0x00
 #define TABLE_ID_PMT        0x02
-#define TABLE_ID_DVB_MIN    0x40
-#define TABLE_ID_DVB_MAX    0x7F
 
 #define ES_STREAM_H264      0x1B
 #define ES_STREAM_ADTS_AAC  0x0F
@@ -236,15 +234,6 @@ static int _ts_demuxer_parse_pmt(TS_DEMUXER* pTsDemuxer, unsigned char* pPayload
     unsigned char uReserved1      = (pPayload[2] & 0x3C) >> 2; // Must be equal to 0x0C
     unsigned int  uSectionLength  = (pPayload[2] & 0x03) << 8;
                   uSectionLength |=  pPayload[3];
-
-    if ((! uPrivateBit)
-    &&  (uTableID   >= TABLE_ID_DVB_MIN)
-    &&  (uTableID   <= TABLE_ID_DVB_MAX)
-    &&  (uReserved1 == 0x0C))
-    {
-        // Table is correct, but it is not PMT
-        return EXIT_SUCCESS;
-    }
 
     if ((uPrivateBit)
     ||  (uTableID   != TABLE_ID_PMT)
